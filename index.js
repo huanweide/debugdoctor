@@ -8,7 +8,7 @@
 const fs = require('fs')
 const path = require('path')
 
-const VERSION = '1.0.0'
+const VERSION = '1.1.0'
 
 // ---- 规则集（按语言）----
 // severity: high(生产致命) / medium(卫生)
@@ -193,17 +193,67 @@ function computeScore(issues, totalLines) {
   return Math.max(0, Math.round(100 - penalty))
 }
 
-// ---- CI 门禁 ----
+// ---- 门禁三态 ----
+// 历史缺陷（家族共性最恶劣失败模式，且本仓有三个变体，全部实测确认）：
+//   a) 空目录 + --max-high 0 --max-issues 0 --min-score 100 → 输出「CI 门禁: 通过」，rc=0
+//   b) 未配任何阈值时，扫到真 debugger 也输出「CI 门禁: 通过」，rc=0
+//   c) --json 的 gate 只有布尔 passed，调用方无法区分「达标」与「根本没判定」
+// 三者在 CI 上都是同一盏永不熄灭的绿灯。现在统一为三态：
+//   pass(0) / fail(2) / inconclusive(3)
+const GATE_STATE = {
+  PASS: 'pass',
+  FAIL: 'fail',
+  INCONCLUSIVE: 'inconclusive',
+}
+
 function computeGate(issues, opts) {
   const highs = issues.filter((i) => i.severity === 'high').length
   const mediums = issues.filter((i) => i.severity === 'medium').length
   const reasons = []
+  const configured = opts.failOnHigh || opts.maxHigh != null ||
+    opts.maxMedium != null || opts.maxIssues != null || opts.minScore != null
+  if (!configured) {
+    return {
+      state: GATE_STATE.INCONCLUSIVE,
+      configured: false,
+      reasons: [],
+      reason: '未配置任何门禁阈值，本次仅体检不判定（请显式传入 --max-high / --max-medium / --max-issues / --min-score / --fail-on-high）',
+    }
+  }
+  // 输入不可信：扫到 0 个文件 → 无法得出任何结论，绝不能报 pass
+  if (opts._scanned === 0) {
+    return {
+      state: GATE_STATE.INCONCLUSIVE,
+      configured: true,
+      reasons: [],
+      reason: '扫描输入为空（0 个可分析文件），无法判定；请确认 --root 指向源码目录且不是全部命中排除规则',
+    }
+  }
+  if (opts._totalLines === 0) {
+    return {
+      state: GATE_STATE.INCONCLUSIVE,
+      configured: true,
+      reasons: [],
+      reason: '扫描到的文件全部无可解析内容，无法判定',
+    }
+  }
   if (opts.failOnHigh && highs > 0) reasons.push(`存在 ${highs} 个高危残留(debugger)`)
   if (opts.maxHigh != null && highs > opts.maxHigh) reasons.push(`高危数 ${highs} > --max-high ${opts.maxHigh}`)
   if (opts.maxMedium != null && mediums > opts.maxMedium) reasons.push(`中危数 ${mediums} > --max-medium ${opts.maxMedium}`)
   if (opts.maxIssues != null && issues.length > opts.maxIssues) reasons.push(`问题数 ${issues.length} > --max-issues ${opts.maxIssues}`)
   if (opts.minScore != null && opts._score < opts.minScore) reasons.push(`健康分 ${opts._score} < --min-score ${opts.minScore}`)
-  return { passed: reasons.length === 0, reasons }
+  return {
+    state: reasons.length === 0 ? GATE_STATE.PASS : GATE_STATE.FAIL,
+    configured: true,
+    reasons,
+    reason: reasons.length === 0 ? '全部指标达标' : '存在不达标项',
+  }
+}
+
+function exitCodeFor(gate) {
+  if (gate.state === GATE_STATE.FAIL) return 2
+  if (gate.state === GATE_STATE.INCONCLUSIVE) return 3
+  return 0
 }
 
 // ---- 参数解析（三类分离，来自 cycscan 方法沉淀）----
@@ -221,24 +271,39 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (NUM_FLAGS.has(a)) {
-      const v = Number(argv[++i])
-      if (!Number.isFinite(v)) { errorExit(`标志 ${a} 需要整数参数`, 2) }
+      const raw = argv[++i]
+      // 历史缺陷：
+      //   Number('') === 0     → 空串静默变成阈值 0
+      //   Number('1.5') === 1.5 → 小数被接受，「高危数 1 > --max-high 1.5」永远为假，门禁失效
+      // 门禁参数写错 = 门禁不存在，一律退 2。
+      const v = Number(raw)
+      if (raw === undefined || String(raw).trim() === '' || !Number.isFinite(v)) {
+        errorExit(`标志 ${a} 需要整数参数（收到: ${raw === undefined ? '<缺失>' : raw}）`, 2)
+      }
+      if (!Number.isInteger(v)) errorExit(`标志 ${a} 需要整数（收到: ${raw}）`, 2)
+      if (v < 0) errorExit(`标志 ${a} 需要非负整数（收到: ${raw}）`, 2)
       if (a === '--max-high') opts.maxHigh = v
       else if (a === '--max-medium') opts.maxMedium = v
       else if (a === '--max-issues') opts.maxIssues = v
       else if (a === '--min-score') opts.minScore = v
     } else if (STR_FLAGS.has(a)) {
       const v = argv[++i]
-      if (v === undefined) { errorExit(`标志 ${a} 需要参数`, 2) }
+      // 历史缺陷：`--root --json` 会把 --json 静默当成目录名吞掉，
+      // 报错变成「根目录不存在或无法访问: --json」，用户完全看不懂。
+      if (v === undefined || v.startsWith('-')) {
+        errorExit(`标志 ${a} 需要参数（收到: ${v === undefined ? '<缺失>' : v}）`, 2)
+      }
       if (a === '--root') opts.root = v
       else if (a === '--exclude') opts.excludes.add(v)
     } else if (BOOL_FLAGS.has(a)) {
       if (a === '--json') opts.json = true
       else if (a === '--fail-on-high') opts.failOnHigh = true
       else if (a === '--no-logger-exempt') opts.loggerExempt = false
-      else if (a === '--help' || a === '-h') { printHelp(); process.exit(0) }
-      else if (a === '--version' || a === '-V') { out(VERSION + '\n'); process.exit(0) }
-    } else if (a.startsWith('--')) {
+      else if (a === '--help' || a === '-h') { printHelp(); process.exitCode = 0; throw new HelpExit() }
+      else if (a === '--version' || a === '-V') { out(VERSION + '\n'); process.exitCode = 0; throw new HelpExit() }
+    } else if (a.startsWith('-')) {
+      // 历史缺陷：只拦 `--` 开头的标志，`-x` 这种短标志漏过去，
+      // 最终变成位置参数被当 root，报「根目录不存在或无法访问: -x」。
       errorExit(`未知标志: ${a}`, 2)
     } else {
       positional.push(a)
@@ -248,9 +313,19 @@ function parseArgs(argv) {
   return opts
 }
 
+// parseArgs 在 --help / --version 时不能直接 process.exit()：
+// 那会截断尚未冲刷的 stdout。改为抛哨兵，由 run() 收尾设置 exitCode。
+class HelpExit extends Error {
+  constructor() { super('help'); this.name = 'HelpExit' }
+}
+
 function errorExit(msg, code) {
-  process.stderr.write('debugdoctor: ' + msg + '\n')
-  process.exit(code)
+  err('debugdoctor: ' + msg + '\n')
+  throw new UsageExit(code)
+}
+
+class UsageExit extends Error {
+  constructor(code) { super('usage'); this.code = code; this.name = 'UsageExit' }
 }
 
 function printHelp() {
@@ -268,7 +343,12 @@ function printHelp() {
     '  --min-score <n>        健康分下限\n' +
     '  --no-logger-exempt     关闭日志模块(logger/log)的 console 豁免\n' +
     '  -V, --version          版本号\n' +
-    '  -h, --help             帮助\n'
+    '  -h, --help             帮助\n\n' +
+    '门禁三态（--json 里见 gate.state / basisComplete）:\n' +
+    '  pass           配了门禁阈值且输入可信、指标达标\n' +
+    '  fail           配了门禁阈值且存在不达标项\n' +
+    '  inconclusive   未配门禁阈值，或扫描输入为空 → 无法下结论，**不算通过**\n\n' +
+    '退出码: 0=通过 / 2=门禁失败 / 3=无法判定 / 其他=运行错误\n'
   )
 }
 
@@ -276,7 +356,22 @@ function out(s) { process.stdout.write(s) }
 function err(s) { process.stderr.write(s) }
 
 // ---- 主流程 ----
+// 注意：errorExit 抛 UsageExit 而非 process.exit（process.exit 会截断 stdout）。
+// 因此整个 run() 主体都必须包在 try/catch 里收口——
+// 参数校验阶段的错误在 parseArgs 里抛，扫描阶段（statSync 失败、root 是文件）
+// 在下面抛。任何一处漏收口都会让 UsageExit 逃逸成未捕获异常，
+// 结果是「满屏 stack trace + rc=1」而不是干净的 rc=2。
 function run(argv) {
+  try {
+    return runInner(argv)
+  } catch (e) {
+    if (e instanceof HelpExit) return
+    if (e instanceof UsageExit) { process.exitCode = e.code; return }
+    throw e
+  }
+}
+
+function runInner(argv) {
   const opts = parseArgs(argv)
   const root = opts.root
   let stat
@@ -309,7 +404,10 @@ function run(argv) {
 
   const score = computeScore(allIssues, totalLines)
   opts._score = score
+  opts._scanned = files.length
+  opts._totalLines = totalLines
   const gate = computeGate(allIssues, opts)
+  const rc = exitCodeFor(gate)
 
   if (opts.json) {
     const report = {
@@ -319,12 +417,17 @@ function run(argv) {
       scannedFiles: files.length,
       totalLines,
       score,
-      gate: { passed: gate.passed, reasons: gate.reasons },
+      gate: { state: gate.state, configured: gate.configured, reasons: gate.reasons, reason: gate.reason },
+      basisComplete: gate.state !== GATE_STATE.INCONCLUSIVE,
       issues: allIssues,
       skipped,
     }
     out(JSON.stringify(report, null, 2) + '\n') // 纯 JSON，不追加任何文本
-    process.exit(gate.passed ? 0 : 2)
+    // 注意：必须用 process.exitCode 而不是 process.exit()。
+    // process.exit() 会截断尚未冲刷的 stdout，令 --json 输出残缺、
+    // 下游 JSON.parse 直接抛错。
+    process.exitCode = rc
+    return
   }
 
   // 人类可读报告
@@ -346,19 +449,20 @@ function run(argv) {
       if (i.snippet) out('      ' + i.snippet.trim() + '\n')
     }
   }
+  // 门禁状态始终显式打印：用户必须一眼看出「这次到底判没判定」。
+  // 只在失败时打印 = 让人误以为「没消息就是通过」。
+  out('\n门禁状态: ' + gate.state + ' — ' + gate.reason + '\n')
   if (gate.reasons.length) {
-    err('\nCI 门禁未通过:\n')
+    err('CI 门禁未通过:\n')
     for (const r of gate.reasons) err('  - ' + r + '\n')
-    process.exit(2)
-  } else {
-    out('CI 门禁: 通过\n')
-    process.exit(0)
   }
+  process.exitCode = rc
 }
 
 module.exports = {
   RULES, stripNoise, isRegexContext, langOf, isTestFile, isLoggerModule,
   scanFile, walk, computeScore, computeGate, parseArgs, countLines, MAX_FILE_BYTES,
+  exitCodeFor, GATE_STATE, VERSION,
 }
 
 if (require.main === module) {

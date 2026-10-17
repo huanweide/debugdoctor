@@ -1,0 +1,18 @@
+{
+  "name": "debugdoctor",
+  "version": "1.1.0",
+  "description": "Zero-dependency debug/log residue detector for JS/TS/Python/Go, with a CI gate that tells you when it cannot conclude (code-health family axis 6).",
+  "bin": { "debugdoctor": "index.js" },
+  "main": "index.js",
+  "type": "commonjs",
+  "files": ["index.js", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check index.js && node --test"
+  },
+  "keywords": ["debug", "debugger", "console", "logging", "cli", "static-analysis", "zero-dependency", "ci", "code-health"],
+  "author": "ReTri · 樊斯瑞",
+  "repository": { "type": "git", "url": "git+https://github.com/huanweide/debugdoctor.git" },
+  "license": "MIT",
+  "engines": { "node": ">=14" }
+}
