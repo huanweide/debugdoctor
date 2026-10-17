@@ -13,7 +13,7 @@
 零依赖，只需 Node >= 14。无需 `npm install`。
 
 ```bash
-node debugdoctor.js --root ./src
+node index.js --root ./src
 # 或（等价）
 node index.js
 ```
@@ -42,16 +42,55 @@ node index.js
 
 ```bash
 # 任一 debugger(高危) 即失败
-node debugdoctor.js --root . --fail-on-high
+node index.js --root . --fail-on-high
 
 # 更细的阈值组合
-node debugdoctor.js --root . --max-high 0 --max-medium 5 --max-issues 20 --min-score 90
+node index.js --root . --max-high 0 --max-medium 5 --max-issues 20 --min-score 90
 
-# JSON 模式：纯 JSON 输出，门禁用退出码 0/2 表达，不污染 stdout
-node debugdoctor.js --root . --json
+# JSON 模式：纯 JSON 输出，门禁用退出码表达，不污染 stdout
+node index.js --root . --json --fail-on-high
 ```
 
-退出码：`0` 通过；`2` 门禁未通过或参数错误（便于 CI `if` 判断）。
+### 门禁三态（重要）
+
+扫描型门禁工具最恶劣的失败模式是「**扫了 0 个对象却报通过**」——CI 上就是一盏永不熄灭的绿灯。
+debugdoctor 历史上同时有三个变体（均已实测确认）：
+
+1. 空目录 + `--max-high 0 --max-issues 0 --min-score 100` → 照样输出「CI 门禁: 通过」，rc=0
+2. 扫到真的 `debugger`、但用户**根本没配门禁** → 也输出「CI 门禁: 通过」，rc=0
+3. `--json` 的 `gate` 只有布尔 `passed`，调用方无法区分「达标」与「根本没判定」
+
+所以 debugdoctor 输出三态（`--json` 里见 `gate.state` 与 `basisComplete`）：
+
+| `gate.state` | 退出码 | 含义 |
+| --- | --- | --- |
+| `pass` | 0 | 配了门禁阈值、输入可信、指标达标 |
+| `fail` | 2 | 配了门禁阈值，且存在不达标项 |
+| `inconclusive` | 3 | **无法下结论**：未配任何门禁阈值，或扫描输入为空 / 全部文件无可解析内容 |
+
+```jsonc
+{
+  "scannedFiles": 128,
+  "score": 96,
+  "gate": {
+    "state": "pass",
+    "configured": true,
+    "reasons": [],
+    "reason": "全部指标达标"
+  },
+  "basisComplete": true   // false 表示本次结论不可信，别拿它当合规证据
+}
+```
+
+> 未配门禁阈值时返回 `3` 而不是 `0`，是刻意的：这样「我只是跑着看看」不会在 CI 里被误读成「检查通过」。
+> 想让它放行，显式写 `--max-high 9999` 即可。
+
+退出码：`0` 通过；`2` 门禁未通过或参数错误；`3` 无法下结论（便于 CI `if` 判断）。
+
+所有数值参数必须是**非负整数**：缺值、空串（`Number('') === 0`）、小数（`--max-high 1.5` 会让
+「高危数 1 > 1.5」永远为假，门禁形同失效）、负数、`abc` 一律退 `2`。
+未知选项（含 `-x` 这类短标志）同样退 `2`——历史上短标志会漏过校验，
+最终变成位置参数被当 `--root`，报出「根目录不存在或无法访问: -x」这种看不懂的错误。
 
 ## 选项
 
@@ -88,7 +127,18 @@ node debugdoctor.js --root . --json
 
 ## CI 门禁用法
 
-开箱即可接入 CI：在流水线中运行本工具，它会输出健康分与严重度；若存在不达标项会以非 0 退出码结束，从而拦下问题提交（具体参数见上方「快速开始」）。
+开箱即可接入 CI：在流水线中运行本工具，它会输出健康分与严重度，并显式打印门禁状态；
+若存在不达标项会以退出码 `2` 结束，若无法下结论则以 `3` 结束——**只有真正判定通过才是 `0`**（具体参数见上方「CI 门禁」）。
+
+## 测试
+
+```bash
+node --test          # 25 组 spawn 级冒烟 + 36 组单测（Node >= 18）
+```
+
+`test/smoke-cli.js` 真实起进程验证**退出码契约**，这一层不可省略：
+历史单测靠 monkey-patch `process.exit` 来验退出码，而源码一旦改成 `process.exitCode`，
+patch 就永远拿到 `null`，测试静默失效却不报红——只有真起进程才拦得住。
 
 ## 赞助支持
 
@@ -96,4 +146,4 @@ node debugdoctor.js --root . --json
 
 ## 许可证
 
-详见 [LICENSE](LICENSE)。
+[MIT](LICENSE)

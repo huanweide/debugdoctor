@@ -6,10 +6,11 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
-const m = require('./index.js')
+// 本文件位于 test/ 下，必须用 .. 回到仓库根加载被测模块
+const m = require('../index.js')
 const {
   stripNoise, langOf, isTestFile, isLoggerModule,
-  scanFile, walk, computeScore, computeGate, parseArgs,
+  scanFile, walk, computeScore, computeGate, parseArgs, exitCodeFor,
 } = m
 
 let passed = 0
@@ -139,18 +140,42 @@ ok('computeScore 超额扣分到底', () => {
 })
 
 // ---- computeGate ----
+// 注意：opts 里必须给 _scanned / _totalLines，否则会命中「输入为空 → inconclusive」，
+// 这正是本轮修复的核心语义。
+const gateOpts = (o) => Object.assign({ _scanned: 1, _totalLines: 10 }, o)
+
 ok('computeGate failOnHigh', () => {
-  const g = computeGate([{ severity: 'high' }], { failOnHigh: true, _score: 100 })
-  assert.ok(!g.passed)
+  const g = computeGate([{ severity: 'high' }], gateOpts({ failOnHigh: true, _score: 100 }))
+  assert.strictEqual(g.state, 'fail')
+  assert.strictEqual(g.configured, true)
 })
 ok('computeGate maxHigh 边界', () => {
   const issues = [{ severity: 'high' }, { severity: 'high' }]
-  assert.ok(!computeGate(issues, { maxHigh: 1, _score: 100 }).passed)
-  assert.ok(computeGate(issues, { maxHigh: 2, _score: 100 }).passed)
+  assert.strictEqual(computeGate(issues, gateOpts({ maxHigh: 1, _score: 100 })).state, 'fail')
+  assert.strictEqual(computeGate(issues, gateOpts({ maxHigh: 2, _score: 100 })).state, 'pass')
 })
 ok('computeGate minScore 边界', () => {
-  assert.ok(!computeGate([], { minScore: 90, _score: 80 }).passed)
-  assert.ok(computeGate([], { minScore: 80, _score: 80 }).passed)
+  assert.strictEqual(computeGate([], gateOpts({ minScore: 90, _score: 80 })).state, 'fail')
+  assert.strictEqual(computeGate([], gateOpts({ minScore: 80, _score: 80 })).state, 'pass')
+})
+ok('computeGate 未配任何阈值 → inconclusive（不是 pass）', () => {
+  const g = computeGate([], gateOpts({ _score: 100 }))
+  assert.strictEqual(g.state, 'inconclusive')
+  assert.strictEqual(g.configured, false)
+})
+ok('computeGate 扫到 0 个文件 → inconclusive（假绿灯防线）', () => {
+  const g = computeGate([], gateOpts({ failOnHigh: true, _scanned: 0, _totalLines: 0, _score: 100 }))
+  assert.strictEqual(g.state, 'inconclusive')
+  assert.strictEqual(g.configured, true)
+})
+ok('computeGate 全部文件无内容 → inconclusive', () => {
+  const g = computeGate([], gateOpts({ failOnHigh: true, _scanned: 3, _totalLines: 0, _score: 100 }))
+  assert.strictEqual(g.state, 'inconclusive')
+})
+ok('exitCodeFor 三态映射', () => {
+  assert.strictEqual(exitCodeFor({ state: 'pass' }), 0)
+  assert.strictEqual(exitCodeFor({ state: 'fail' }), 2)
+  assert.strictEqual(exitCodeFor({ state: 'inconclusive' }), 3)
 })
 
 // ---- parseArgs ----
@@ -158,19 +183,32 @@ ok('parseArgs --root', () => {
   assert.strictEqual(parseArgs(['--root', '/tmp/x']).root, '/tmp/x')
 })
 ok('parseArgs 未知标志报错(exit2)', () => {
-  const realExit = process.exit
   let code = null
-  process.exit = (c) => { code = c; throw new Error('exit') }
-  try { parseArgs(['--bogus']) } catch (e) { /* expected */ }
-  process.exit = realExit
+  try { parseArgs(['--bogus']) } catch (e) { code = e.code; /* expected */ }
+  assert.strictEqual(code, 2)
+})
+ok('parseArgs 短标志 -x 也必须退 2（历史缺陷：漏到位置参数）', () => {
+  let code = null
+  try { parseArgs(['-x']) } catch (e) { code = e.code; /* expected */ }
+  assert.strictEqual(code, 2)
+})
+ok('parseArgs 数值标志拒绝空串 / 小数 / 负数', () => {
+  for (const bad of ['', '  ', '1.5', '-1', 'abc']) {
+    let code = null
+    try { parseArgs(['--max-high', bad]) } catch (e) { code = e.code; /* expected */ }
+    assert.strictEqual(code, 2, `'${bad}' 应退 2`)
+  }
+})
+ok('parseArgs --root 不吞后续标志', () => {
+  let code = null
+  try { parseArgs(['--root', '--json']) } catch (e) { code = e.code; /* expected */ }
   assert.strictEqual(code, 2)
 })
 ok('parseArgs --max-high 非整数报错(exit2)', () => {
-  const realExit = process.exit
+  // 现在 errorExit 抛 UsageExit 而非 process.exit —— 直接断言异常上的 code，
+  // 不要再去 monkey-patch process.exit（它已不再被调用，patch 会永远拿到 null）。
   let code = null
-  process.exit = (c) => { code = c; throw new Error('exit') }
-  try { parseArgs(['--max-high', 'abc']) } catch (e) { /* expected */ }
-  process.exit = realExit
+  try { parseArgs(['--max-high', 'abc']) } catch (e) { code = e.code; /* expected */ }
   assert.strictEqual(code, 2)
 })
 
@@ -196,7 +234,8 @@ ok('integration 脏仓库精准报出(零误报)', () => {
 
 // ---- dogfood 自身归零 ----
 ok('dogfood 扫自身 index.js 0 问题', () => {
-  const fp = path.join(__dirname, 'index.js')
+  // 本文件位于 test/ 下，必须用 .. 回到仓库根，否则扫的是测试文件
+  const fp = path.join(__dirname, '..', 'index.js')
   const r = scanFile(fp, fs.readFileSync(fp, 'utf8'))
   assert.strictEqual(r.issues.length, 0)
 })

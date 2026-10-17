@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['14', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 语法检查
+        run: node --check index.js
+
+      - name: 单测 + spawn 级冒烟（Node >= 18）
+        if: matrix.node != '14'
+        run: node --test
+        shell: bash
+
+      - name: 冒烟自检（Node 14 兼容路径）
+        if: matrix.node == '14'
+        shell: bash
+        run: |
+          set -e
+          node index.js --version
+          node index.js --help > /dev/null
+          d=$(mktemp -d)
+          set +e
+          node index.js --root "$d" --fail-on-high
+          code=$?
+          set -e
+          test "$code" -eq 3 || { echo "空输入应退 3，实际 $code"; exit 1; }
+          set +e
+          node index.js --bogus > /dev/null 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 2 || { echo "未知标志应退 2，实际 $code"; exit 1; }
+
+  dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 用 debugdoctor 体检 debugdoctor 自己
+        run: node index.js --json --root . --fail-on-high
