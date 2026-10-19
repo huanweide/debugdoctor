@@ -147,3 +147,13 @@ patch 就永远拿到 `null`，测试静默失效却不报红——只有真起�
 ## 许可证
 
 [MIT](LICENSE)
+---
+
+## 便携性 · 零依赖承诺
+
+- 零运行时依赖：只用一个 Node 内置模块，无需 `npm install`。
+- 单文件：整个工具就是一个 `index.js`，复制进任何仓库即可用。
+- 离线 / 跨平台：Node 18+ 即可，不联网、不挑系统。
+- 一键跑：`node index.js --root ./src`（详见上方用法）。
+
+← [回到代码健康家族总览](https://github.com/huanweide/family-showcase)
