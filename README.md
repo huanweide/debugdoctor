@@ -138,7 +138,7 @@ debugdoctor 历史上同时有三个变体（均已实测确认）：
 
 ## 作者
 
-由 **ReTr · 樊斯瑞** 维护 · [GitHub 主页](https://github.com/huanweide)
+由 **ReTr · huanweide** 维护 · [GitHub 主页](https://github.com/huanweide)
 
 ## CI 门禁用法
 
@@ -155,9 +155,6 @@ node --test          # 25 组 spawn 级冒烟 + 36 组单测（Node >= 18）
 历史单测靠 monkey-patch `process.exit` 来验退出码，而源码一旦改成 `process.exitCode`，
 patch 就永远拿到 `null`，测试静默失效却不报红——只有真起进程才拦得住。
 
-## 赞助支持
-
-如果这个项目帮到了你，欢迎 [点 Star](https://github.com/huanweide/debugdoctor) 支持；也可微信扫码自愿赞助（收款码见 `sponsor/wechat-qr.png`，作者本人带 Tri 水印的码，纯静态图片、不含任何密钥）。
 
 ## 许可证
 

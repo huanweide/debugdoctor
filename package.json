@@ -11,7 +11,7 @@
     "lint": "node --check index.js && node --test"
   },
   "keywords": ["debug", "debugger", "console", "logging", "cli", "static-analysis", "zero-dependency", "ci", "code-health"],
-  "author": "ReTri · 樊斯瑞",
+  "author": "ReTri · huanweide",
   "repository": { "type": "git", "url": "git+https://github.com/huanweide/debugdoctor.git" },
   "license": "MIT",
   "engines": { "node": ">=14" }
